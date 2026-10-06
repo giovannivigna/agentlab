@@ -652,3 +652,13 @@ Langfuse v4 writes to ClickHouse's `events_full`, and the legacy `traces` and
 --password clickhouse --query "SELECT count() FROM default.events_full"`.
 
 **Everything is confusing and you want to start over.** `make clean && make up`.
+
+---
+
+## License
+
+Public domain, under [The Unlicense](LICENSE): copy, change, use and
+redistribute it for any purpose, with or without credit. The images it builds
+on (LiteLLM, Langfuse, ClickHouse, MinIO, Postgres, Redis and the Python
+packages in `agent/uv.lock`) are pulled at build time under their own
+licenses; none of their code is in this repository.
