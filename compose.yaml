@@ -1,0 +1,442 @@
+# ===========================================================================
+# Agent Lab - a minimal but complete agentic runtime.
+#
+#   make up      bring up the platform for the current MODE
+#   make run     run the pipeline once over input/items/, results in output/
+#   make down    stop everything
+#
+# The agent is a pipeline: read each input item, classify it as text, image
+# or binary, hand it to a specialist agent for that kind, write the result.
+# Around it, roughly one container per thing every agentic system needs:
+#
+#   a model endpoint     gateway   (LiteLLM + its key database, one container)
+#   tools                mcp       (the processing server, over MCP/HTTP)
+#                        + app/io_server.py (local I/O server, MCP/stdio)
+#   a memory             kb        (Postgres: results by content hash)
+#   a record             langfuse  (what the agent did, and why; one container)
+#   a boundary           networks + read-only mounts + non-root users
+#   a verdict            eval      (scores output/ against expectations)
+#
+# MODES. MODE in .env (or `make up MODE=kb`) picks one of four cumulative
+# shapes; the Makefile turns it into compose profiles plus the variables that
+# tell the agent what exists:
+#
+#   1 gateway   gateway + the mock model      profiles: -
+#   2 agent     + pipeline + processing MCP   profiles: mcp       (agent is a job)
+#   3 kb        + memory                      profiles: mcp,kb    KB_ENABLED
+#   4 full      + Langfuse tracing            profiles: mcp,kb,obs  LANGFUSE_BASE_URL
+#
+# The boundary is the one most tutorials skip, and the one that decides how
+# much damage a misbehaving agent can do. Read the `networks:` block at the
+# bottom before anything else.
+# ===========================================================================
+
+name: ${COMPOSE_PROJECT_NAME:-agentlab}
+
+services:
+
+  # -----------------------------------------------------------------------
+  # THE AGENT
+  #
+  # Not started by `up`: it is a job, not a server. `make run` invokes it,
+  # it processes every item in input/items/, writes to output/, and exits.
+  # It launches the local I/O MCP server (app/io_server.py) as its own
+  # subprocess - so that server lives inside this container, with these
+  # mounts and this user, and needs no entry of its own here.
+  # -----------------------------------------------------------------------
+  agent:
+    profiles: ["agent"]          # excluded from `up`; `compose run` still works
+    build:
+      context: ./agent
+      args:
+        APP_UID: ${AGENT_UID:-1000}
+        APP_GID: ${AGENT_GID:-1000}
+    image: agentlab/agent:latest
+    user: "${AGENT_UID:-1000}:${AGENT_GID:-1000}"
+    depends_on:
+      gateway:
+        condition: service_healthy
+      # `required: false`: wait for these when the mode runs them. The
+      # pipeline cannot work without `mcp` and says so loudly at startup;
+      # `kb` is optional and announced by KB_ENABLED.
+      mcp:
+        condition: service_healthy
+        required: false
+      kb:
+        condition: service_healthy
+        required: false
+    environment:
+      # The model, as far as the agent is concerned, is one URL and one key -
+      # and the key is this agent's own virtual key, not a vendor's and not
+      # the gateway's master key. What it may call, and how much, is its
+      # entry in gateway/agents.yaml (`pipeline`). No provider credential is
+      # ever present in this container's environment.
+      AGENT_BASE_URL: http://gateway:4000/v1
+      AGENT_API_KEY: ${AGENT_GATEWAY_KEY:-sk-agentlab-pipeline-local}
+      AGENT_MODEL: ${AGENT_MODEL:-mock-model}
+      AGENT_MAX_STEPS: ${AGENT_MAX_STEPS:-12}
+      AGENT_MAX_ITEMS: ${AGENT_MAX_ITEMS:-100}
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+
+      MCP_URL: http://mcp:8000/mcp
+
+      # Optional parts. false / empty means "this mode does not run it".
+      KB_ENABLED: ${KB_ENABLED:-false}
+      KB_DSN: postgresql://${KB_USER:-agentlab}:${KB_PASSWORD:-agentlab-password}@kb:5432/${KB_DB:-kb}
+
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-agentic}
+      # The link printed at the end of a run has to work in YOUR browser, not
+      # in the container's network namespace.
+      LANGFUSE_PUBLIC_URL: http://localhost:3000
+
+      INPUT_DIR: /work/input
+      OUTPUT_DIR: /work/output
+    volumes:
+      # The containment boundary, in two characters. Inputs are `ro`: nothing
+      # in this container - pipeline, I/O server or a confused model - can
+      # alter what it was given. Outputs are the only writable path that
+      # survives the container.
+      - ./input:/work/input:ro
+      - ./output:/work/output
+      # Live-edit the agent without rebuilding the image.
+      - ./agent/app:/app/app:ro
+    networks: [internal]         # <- and nothing else. See the note below.
+
+  # -----------------------------------------------------------------------
+  # THE PROCESSING SERVER  (profile: mcp - every mode but `gateway`)
+  #
+  # process_text, process_image, process_binary, behind MCP over HTTP at
+  # http://mcp:8000/mcp. The specialists call these; the bytes arrive from
+  # the pipeline, never from the model. Read mcp/server.py.
+  #
+  # Its boundary is the tightest in the stack, because it does the riskiest
+  # thing - it parses untrusted files (Pillow decodes images) - and needs the
+  # least: no mounts at all, a read-only root filesystem, no Linux
+  # capabilities, no credentials, and `internal` only, so it can answer the
+  # agent and reach nothing else. If a crafted image ever exploits the
+  # parser, this is everything the attacker gets.
+  # -----------------------------------------------------------------------
+  mcp:
+    profiles: ["mcp"]
+    build:
+      context: ./mcp
+    image: agentlab/mcp-processors:latest
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=3)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    networks: [internal]
+
+  # -----------------------------------------------------------------------
+  # THE KNOWLEDGE BASE  (profile: kb - MODE=kb and full)
+  #
+  # The pipeline's memory: one table of results keyed by the SHA-256 of the
+  # content (kb/seed/01_schema.sql). Before a specialist runs, the pipeline
+  # asks it "have I processed these exact bytes before?" and, on a hit,
+  # skips the specialist altogether. Plain Postgres: an exact-match lookup
+  # by key is the oldest thing databases do well.
+  # -----------------------------------------------------------------------
+  kb:
+    image: postgres:17
+    profiles: ["kb"]
+    environment:
+      POSTGRES_USER: ${KB_USER:-agentlab}
+      POSTGRES_PASSWORD: ${KB_PASSWORD:-agentlab-password}
+      POSTGRES_DB: ${KB_DB:-kb}
+    ports:
+      # 5433 on the host, so this never fights a Postgres you already run.
+      #   psql postgresql://agentlab:agentlab-password@localhost:5433/kb
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - kb_memory:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${KB_USER:-agentlab} -d ${KB_DB:-kb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks: [internal, edge]
+
+  # One-shot schema loader. KB_MODE=fresh drops and recreates the memory on
+  # every `up`, so the first run after it is all misses and the second all
+  # hits; KB_MODE=keep creates it only if missing, so memory survives.
+  kb-seed:
+    profiles: ["seed"]           # a job, like the agent; `make seed` runs it
+    image: agentlab/agent:latest
+    build:
+      context: ./agent
+      args:
+        APP_UID: ${AGENT_UID:-1000}
+        APP_GID: ${AGENT_GID:-1000}
+    user: "${AGENT_UID:-1000}:${AGENT_GID:-1000}"
+    depends_on:
+      kb:
+        condition: service_healthy
+    environment:
+      KB_DSN: postgresql://${KB_USER:-agentlab}:${KB_PASSWORD:-agentlab-password}@kb:5432/${KB_DB:-kb}
+      KB_MODE: ${KB_MODE:-fresh}
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      SEED_DIR: /work/kb/seed
+    volumes:
+      - ./kb/seed:/work/kb/seed:ro
+      - ./agent/app:/app/app:ro
+    entrypoint: ["python", "-m", "app.seed"]
+    restart: "no"
+    networks: [internal]
+
+  # -----------------------------------------------------------------------
+  # THE EVALUATOR
+  #
+  # Reads output/items/ after a run and scores each item against
+  # eval/expectations.json: the right kind, the right result, the right
+  # tool, and nothing from the item's content leaking into the summary.
+  #
+  # Two details are the point. First, `eval/` is mounted here and NOWHERE
+  # else - the agent has no path to the answer key, which is the difference
+  # between an evaluation and a rehearsal. Second, `output/` is mounted
+  # read-only: a run is a fixed artefact by the time it is scored.
+  # -----------------------------------------------------------------------
+  eval:
+    profiles: ["eval"]
+    image: agentlab/agent:latest
+    build:
+      context: ./agent
+      args:
+        APP_UID: ${AGENT_UID:-1000}
+        APP_GID: ${AGENT_GID:-1000}
+    user: "${AGENT_UID:-1000}:${AGENT_GID:-1000}"
+    environment:
+      OUTPUT_DIR: /work/output
+      EVAL_DIR: /work/eval
+      REPORT_DIR: /work/report
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+    volumes:
+      - ./output:/work/output:ro
+      - ./eval:/work/eval:ro
+      - ./report:/work/report
+      - ./agent/app:/app/app:ro
+    entrypoint: ["python", "-m", "app.evaluate"]
+    networks: [internal]
+
+  # -----------------------------------------------------------------------
+  # THE MODEL GATEWAY
+  #
+  # Every request to a model goes through here. That buys three things worth
+  # more than the container costs:
+  #   1. provider keys live in ONE process, not in the agent;
+  #   2. swapping mock -> GPT -> a local Llama is an edit to
+  #      gateway/config.yaml, with no change to the agent at all;
+  #   3. there is one chokepoint at which to see, rate-limit, or cut off
+  #      everything the agent says to a model - per agent, because each one
+  #      presents its own virtual key (gateway/agents.yaml).
+  #
+  # One container, two processes: LiteLLM, and the Postgres that holds its
+  # virtual keys and spend (gateway/Dockerfile, gateway/entrypoint.sh).
+  # Postgres listens on the container's own 127.0.0.1, so no network in this
+  # file reaches it - an agent cannot raise its own budget in a database it
+  # has no route to.
+  # -----------------------------------------------------------------------
+  gateway:
+    build:
+      context: ./gateway
+    image: agentlab/gateway:latest
+    depends_on:
+      mock-llm:
+        condition: service_healthy
+        # Restart the gateway whenever compose recreates the mock (which
+        # `up --build` does on every call). LiteLLM caches DNS, so a gateway
+        # that outlives the mock keeps sending model calls to its OLD address
+        # - which, once mcp starts on the same network and port, may be the
+        # MCP server. That fails as a baffling 404 from "OpenAI".
+        restart: true
+    environment:
+      LITELLM_MASTER_KEY: ${GATEWAY_MASTER_KEY:-sk-agentlab-master-local}
+      GATEWAY_DB_PASSWORD: ${GATEWAY_DB_PASSWORD:-litellmpassword}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./gateway/config.yaml:/app/config.yaml:ro
+      - gateway_pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:4000:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:4000/health/liveliness',timeout=3)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 90s            # first boot: initdb, then LiteLLM's migrations
+    networks: [internal, edge]
+
+  # One-shot: sync gateway/agents.yaml into the gateway as virtual keys.
+  # `make up` and `make keys` run it. Runs from the upstream LiteLLM image,
+  # which already has Python and PyYAML, and is the only thing besides the
+  # gateway that is handed the master key.
+  #
+  # Adding an agent is an entry in agents.yaml, its key in .env, and that
+  # key's name in the environment below.
+  gateway-keys:
+    profiles: ["keys"]
+    image: ghcr.io/berriai/litellm:main-stable
+    depends_on:
+      gateway:
+        condition: service_healthy
+    entrypoint: ["python", "/provision/provision.py"]
+    environment:
+      LITELLM_MASTER_KEY: ${GATEWAY_MASTER_KEY:-sk-agentlab-master-local}
+      AGENT_GATEWAY_KEY: ${AGENT_GATEWAY_KEY:-sk-agentlab-pipeline-local}
+      INTERN_GATEWAY_KEY: ${INTERN_GATEWAY_KEY:-sk-agentlab-intern-local}
+      CLI_GATEWAY_KEY: ${CLI_GATEWAY_KEY:-sk-agentlab-cli-local}
+    volumes:
+      - ./gateway/agents.yaml:/provision/agents.yaml:ro
+      - ./gateway/provision.py:/provision/provision.py:ro
+    restart: "no"
+    networks: [internal]
+
+  # The offline model: a pattern-matching fake that speaks the OpenAI wire
+  # protocol. It exists so the whole stack runs with no API key and no
+  # network - and so a demo cannot fail because of somebody's rate limit.
+  mock-llm:
+    build:
+      context: ./mock
+    image: agentlab/mock-llm:latest
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/v1/models',timeout=3)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    networks: [internal]
+
+  # -----------------------------------------------------------------------
+  # TRACING  (profile: obs - MODE=full)
+  #
+  # An agent's transcript is the only artefact that explains a bad outcome:
+  # which tool was called, with what arguments, on whose instruction. When
+  # something goes wrong, that transcript is the evidence, so it is
+  # infrastructure, not a nicety.
+  #
+  # Langfuse v4 is six processes: web, worker, Postgres, ClickHouse, Redis
+  # and MinIO. Upstream runs them as six containers; here they are one
+  # (langfuse/Dockerfile, langfuse/entrypoint.sh), and the four stores listen
+  # on the container's own 127.0.0.1. The only port anything else can reach
+  # is 3000: the UI, and the API the agent sends traces to. The honest cost
+  # is unchanged - about 3 GB of RAM, most of it ClickHouse.
+  # -----------------------------------------------------------------------
+  langfuse:
+    profiles: ["obs"]
+    build:
+      context: ./langfuse
+    image: agentlab/langfuse:latest
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - langfuse_data:/data
+    # Without this, `up --wait` returns before Langfuse has finished its
+    # first-boot migrations, the very first `make run` fails its auth check,
+    # and tracing silently switches itself off - which is the fail-soft
+    # behaviour working exactly as designed and exactly when you least want
+    # it. First boot creates four databases and runs every migration.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/public/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 180s
+    environment:
+      # Next.js binds to $HOSTNAME, which Docker sets to the container id -
+      # an address on ONE of this container's two networks. The entrypoint
+      # sets it to 0.0.0.0 as well, but it is stated here because this is
+      # the bug you will meet in any Next.js container on two networks: it
+      # listens on `edge`, its name resolves to `internal`, and the agent's
+      # traces go nowhere. Silently, because tracing is fail-soft.
+      HOSTNAME: "0.0.0.0"
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-dev-nextauth-secret}
+      SALT: ${LANGFUSE_SALT:-dev-salt}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-false}
+      # The four stores, all on loopback inside this container.
+      LANGFUSE_POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD:-postgres}
+      DATABASE_URL: postgresql://postgres:${LANGFUSE_POSTGRES_PASSWORD:-postgres}@127.0.0.1:5432/postgres
+      CLICKHOUSE_MIGRATION_URL: clickhouse://127.0.0.1:9000
+      CLICKHOUSE_URL: http://127.0.0.1:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${LANGFUSE_REDIS_AUTH:-redispassword}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://127.0.0.1:9100
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://127.0.0.1:9100
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      # Headless initialisation: the org, project, user and API keys below are
+      # created on first boot. This is why .env can hand the agent working
+      # Langfuse credentials before anyone has opened the UI.
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-agentlab}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-Agent Lab}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-agentic}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-Agentic Programming}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-You}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+    restart: unless-stopped
+    # Six processes stop in order (entrypoint.sh), and ClickHouse and
+    # Postgres want to flush before they go. Docker's default 10 s ends
+    # that with SIGKILL.
+    stop_grace_period: 60s
+    # `internal` so the agent can send traces; `edge` because Docker cannot
+    # publish a port from a container that is only on an internal network.
+    networks: [internal, edge]
+
+
+# ===========================================================================
+# THE BOUNDARY
+#
+# `internal: true` means Docker gives this network no route off the host.
+# The agent container is attached to `internal` and to nothing else, so:
+#
+#   - it can reach gateway, mcp, kb and langfuse by name;
+#   - it cannot reach the internet. Not github, not an S3 bucket, not a
+#     pastebin. A tool that tries gets ENETUNREACH, not a silent exfiltration.
+#
+# The same holds for the processing server, which is on `internal` alone.
+#
+# Everything the agent is allowed to touch is therefore an explicit line in
+# this file. That is the property to insist on in your project: the blast
+# radius of a compromised agent should be readable from its deployment
+# manifest, not discovered afterwards from a firewall log.
+#
+# Try it:  make shell   then   python -c "import socket;socket.create_connection(('1.1.1.1',443),3)"
+# ===========================================================================
+networks:
+  internal:
+    internal: true
+  edge:
+    driver: bridge
+
+volumes:
+  kb_memory:
+  gateway_pgdata:
+  langfuse_data:

@@ -1,0 +1,20 @@
+<!-- ClickHouse inside the Langfuse container: loopback only, quiet logs.
+     The user Langfuse connects as is written at startup by entrypoint.sh,
+     from CLICKHOUSE_USER / CLICKHOUSE_PASSWORD. -->
+<clickhouse>
+    <listen_host>127.0.0.1</listen_host>
+
+    <!-- Protocols Langfuse does not use: off, so nothing listens on them. -->
+    <mysql_port remove="1"/>
+    <postgresql_port remove="1"/>
+    <interserver_http_port remove="1"/>
+
+    <!-- To the container's stdout, warnings and up. The default is `trace`
+         to a file, which fills a disk and tells you nothing. -->
+    <logger>
+        <level>warning</level>
+        <console>1</console>
+        <log remove="1"/>
+        <errorlog remove="1"/>
+    </logger>
+</clickhouse>

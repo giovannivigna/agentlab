@@ -1,0 +1,17 @@
+# Your local configuration. Copied from .env.example by `make up`; may hold
+# real API keys once you add them, so it never belongs in git.
+.env
+
+# What a run produces.
+output/*
+!output/.gitkeep
+report/*
+!report/.gitkeep
+
+# Python and editor leftovers.
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+.idea/
+.vscode/

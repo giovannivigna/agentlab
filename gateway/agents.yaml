@@ -1,0 +1,67 @@
+# Who may call the gateway, for which models, and how much.
+#
+# config.yaml says what a model name MEANS. This file says who may USE it.
+# Every entry becomes a LiteLLM virtual key: a credential that the gateway
+# checks on every request against its own allowlist, budget and rate limits.
+# The agent presents that key and nothing else - it never holds the master
+# key, so it cannot mint itself a better one.
+#
+# `make keys` (also run by `make up`) syncs this file into the gateway. It is
+# idempotent: an existing key is updated in place, a new one is created, and a
+# key whose entry you delete here is revoked. Spend already recorded against a
+# key survives an update; `make clean` is what zeroes it.
+#
+# Everything under an agent except `key` is passed to LiteLLM's /key/generate
+# unchanged, so any field it accepts works here. The ones worth knowing:
+#
+#   models                 names from config.yaml this key may call; any
+#                          other name is refused with a 401
+#   max_budget             USD; past it, every call is refused
+#   budget_duration        when spend resets: 30s, 1h, 1d, 30d
+#   rpm_limit / tpm_limit  requests / tokens per minute; past it, a 429
+#   max_parallel_requests  concurrent in-flight calls
+#   aliases                per-key renames: {"mock-model": "gpt-4o-mini"}
+#                          sends this agent to a different model while its
+#                          code still asks for the same name
+#
+# `key` follows config.yaml's convention: `os.environ/NAME` reads it from the
+# provisioner's environment (see `gateway-keys` in compose.yaml, and .env).
+# LiteLLM requires every key to start with `sk-` and be 16+ characters.
+
+agents:
+
+  # The pipeline - `make run`. Its three specialists share this key, and they
+  # need chat models and nothing else: no embedding model is on the list,
+  # because nothing in the pipeline embeds.
+  pipeline:
+    key: os.environ/AGENT_GATEWAY_KEY
+    models: [mock-model, gpt-4o-mini, claude]
+    max_budget: 2.00
+    budget_duration: 1d
+    rpm_limit: 120
+    tpm_limit: 200000
+    max_parallel_requests: 4
+
+  # You, at a shell, in MODE=gateway. Not an agent, but a client like any
+  # other, and the gateway does not need to know the difference:
+  #   make ask Q="Say hello"
+  #   curl -H "Authorization: Bearer sk-agentlab-cli-local" localhost:4000/v1/models
+  cli:
+    key: os.environ/CLI_GATEWAY_KEY
+    models: [mock-model, mock-embed, gpt-4o-mini, claude, text-embedding-3-small]
+    max_budget: 1.00
+    budget_duration: 1d
+    rpm_limit: 30
+
+  # A deliberately starved agent, for watching the limits fire. Run as it with
+  #   AGENT_GATEWAY_KEY=sk-agentlab-intern-local make run
+  # and partway through the batch the specialists start failing: the
+  # (pretend) budget on mock-model trips. Those items are still written, with
+  # the gateway's error in them; read one, then the gateway's log line for the
+  # same request. It also has a one-model allowlist - least privilege is a
+  # list you can read - which `make check` tests.
+  intern:
+    key: os.environ/INTERN_GATEWAY_KEY
+    models: [mock-model]
+    max_budget: 0.004            # about half of one run at mock-model's pretend price
+    rpm_limit: 6

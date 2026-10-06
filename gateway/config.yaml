@@ -1,0 +1,81 @@
+# LiteLLM proxy - the one place that knows where models live.
+#
+# The agent asks for AGENT_MODEL and gets whatever this file says that name
+# means. Change the mapping, restart the gateway (`docker compose restart
+# gateway`), and the agent is talking to a different vendor without having
+# been rebuilt, reconfigured, or even stopped.
+
+model_list:
+
+  # Default: the offline fake. No key, no network, same answers every time -
+  # which is what you want while testing
+  # plumbing rather than models.
+  #
+  # "No cost" would also mean no budget could ever trip, so it carries a
+  # PRETEND price, roughly a small frontier model's. Nobody is billed; the
+  # gateway just has something to add up against the budgets in agents.yaml.
+  - model_name: mock-model
+    litellm_params:
+      model: openai/mock-model
+      api_base: http://mock-llm:8000/v1
+      api_key: mock
+      input_cost_per_token: 0.0000025     # $2.50 per million, pretend
+      output_cost_per_token: 0.00001      # $10 per million, pretend
+
+  # The offline embedding model. The pipeline does not embed anything; this
+  # and the next entry are here for MODE=gateway, so `/v1/embeddings` can be
+  # tried from the shell like `/v1/chat/completions`.
+  - model_name: mock-embed
+    litellm_params:
+      model: openai/mock-embed
+      api_base: http://mock-llm:8000/v1
+      api_key: mock
+      input_cost_per_token: 0.00000002    # $0.02 per million, pretend
+
+  # A real embedding model: 1536 dimensions to mock-embed's 256.
+  - model_name: text-embedding-3-small
+    litellm_params:
+      model: openai/text-embedding-3-small
+      api_key: os.environ/OPENAI_API_KEY
+
+  # A real model. Set OPENAI_API_KEY in .env, then AGENT_MODEL=gpt-4o-mini.
+  # Note where the key is read: here, in the gateway's environment. The agent
+  # container never sees it, so a prompt injection that dumps os.environ gets
+  # the agent's own virtual key - limited to the models, budget and rate that
+  # gateway/agents.yaml gives it - rather than your billing account.
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: claude
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # A model on your own machine. `host.docker.internal` is how a container
+  # reaches the host; the agent still only knows the name "local".
+  # - model_name: local
+  #   litellm_params:
+  #     model: openai/llama3.1:8b
+  #     api_base: http://host.docker.internal:11434/v1
+  #     api_key: ollama
+
+litellm_settings:
+  drop_params: true          # silently drop params a given provider rejects
+  # Uncomment to log every model call to Langfuse from the gateway as well as
+  # from the agent. Useful when you want the raw request the vendor saw, not
+  # the graph-shaped view the agent's callback produces.
+  # success_callback: ["langfuse"]
+  # failure_callback: ["langfuse"]
+
+general_settings:
+  # The admin credential. It can mint keys, so only the gateway and the
+  # `gateway-keys` provisioner hold it - never an agent. Agents get virtual
+  # keys, defined in gateway/agents.yaml, each with its own model allowlist,
+  # budget and rate limits. A runaway ReAct loop is a billing incident before
+  # it is a bug report; a per-agent budget is what keeps it a bug report.
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Virtual keys and their spend live in the Postgres that runs inside this
+  # container (gateway/entrypoint.sh sets DATABASE_URL). Models stay here.
+  store_model_in_db: false

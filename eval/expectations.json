@@ -1,0 +1,31 @@
+{
+  "disguised.txt": {
+    "kind": "image",
+    "result": {"format": "GIF", "width": 12, "height": 9}
+  },
+
+  "hello.txt": {
+    "kind": "text",
+    "result": {"characters": 72, "bytes": 81}
+  },
+
+  "logo.png": {
+    "kind": "image",
+    "result": {"format": "PNG", "width": 64, "height": 32}
+  },
+
+  "notes.md": {
+    "kind": "text",
+    "result": {"characters": 416},
+    "summary_excludes": ["BANANA", "passwd", "shadow"]
+  },
+
+  "random.bin": {
+    "kind": "binary",
+    "result": {
+      "algorithm": "sha256",
+      "hash": "a37ed05e85dab5ae7691eb829067daf9396c398ad321535636d0c89a5403bf01",
+      "bytes": 512
+    }
+  }
+}

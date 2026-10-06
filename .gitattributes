@@ -1,0 +1,10 @@
+# LF everywhere, on every platform. The shell scripts run inside Linux
+# containers, and the sample inputs are measured byte for byte by the
+# evaluator - a Windows checkout that rewrote them to CRLF would break both.
+* text=auto eol=lf
+
+# The sample inputs are data, not text to be normalised. disguised.txt in
+# particular is a GIF wearing a .txt name, on purpose.
+input/items/* -text
+*.png binary
+*.bin binary
