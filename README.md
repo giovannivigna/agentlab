@@ -710,7 +710,9 @@ Langfuse v4 writes to ClickHouse's `events_full`, and the legacy `traces` and
 
 ---
 
-## License
+## Author and license
+
+Written by Giovanni Vigna (see [AUTHORS](AUTHORS)).
 
 Public domain, under [The Unlicense](LICENSE): copy, change, use and
 redistribute it for any purpose, with or without credit. The images it builds
