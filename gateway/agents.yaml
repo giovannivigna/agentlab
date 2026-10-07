@@ -35,7 +35,7 @@ agents:
   # because nothing in the pipeline embeds.
   pipeline:
     key: os.environ/AGENT_GATEWAY_KEY
-    models: [mock-model, gpt-4o-mini, claude]
+    models: [mock-model, external, gpt-4o-mini, claude]
     max_budget: 2.00
     budget_duration: 1d
     rpm_limit: 120
@@ -48,7 +48,7 @@ agents:
   #   curl -H "Authorization: Bearer sk-agentlab-cli-local" localhost:4000/v1/models
   cli:
     key: os.environ/CLI_GATEWAY_KEY
-    models: [mock-model, mock-embed, gpt-4o-mini, claude, text-embedding-3-small]
+    models: [mock-model, mock-embed, external, gpt-4o-mini, claude, text-embedding-3-small]
     max_budget: 1.00
     budget_duration: 1d
     rpm_limit: 30

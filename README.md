@@ -26,6 +26,8 @@ the agent rather than the agent itself.
 - **Memory:** about 2 GB for modes 1–3, and about 5 GB with tracing (mode 4).
   On Docker Desktop, check the memory limit in its settings.
 - Free local ports **3000**, **4000** and **5433**.
+- **Optional:** an API key for any OpenAI-compatible provider, or a local
+  model server, if you want to try a real model (`make connect`).
 
 ## Quick start
 
@@ -93,6 +95,49 @@ OPENAI_BASE_URL=http://localhost:4000/v1 OPENAI_API_KEY=sk-agentlab-cli-local \
 Anything that speaks the OpenAI protocol works the same way: the official
 SDKs, LangChain, LiteLLM, or your own scripts.
 
+### Connect a real model
+
+The gateway has a model named **`external`** that forwards to any
+OpenAI-compatible endpoint you choose. Tell it where:
+
+```bash
+make connect
+```
+
+It asks for three things — the base URL, the model name, and the API key (not
+echoed) — saves them to `.env`, recreates the gateway so it reads them, and
+sends one short request through it to prove the path works.
+
+| Provider | Base URL | Model, for example |
+|---|---|---|
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4o-mini` |
+| Groq | `https://api.groq.com/openai/v1` | `llama-3.1-8b-instant` |
+| Ollama, on your machine | `http://host.docker.internal:11434/v1` | `llama3.1:8b` (no key) |
+
+Then call it exactly as you called the mock — same URL, same key, a different
+model name:
+
+```bash
+curl -s localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-agentlab-cli-local" -H "Content-Type: application/json" \
+  -d '{"model":"external","messages":[{"role":"user","content":"In one sentence: what is an AI agent?"}]}'
+
+make ask ASK_MODEL=external Q="In one sentence: what is an AI agent?"
+```
+
+Look at what that request carries: the gateway's `cli` key, not your
+provider's. The provider key sits in `.env`, is passed to the gateway
+container alone, and is never handed to a client — or to an agent. To switch
+providers, run `make connect` again; the command above does not change. To
+run the whole pipeline on your model, `AGENT_MODEL=external make run`.
+
+Two things to know. The gateway makes the call from inside its container, so
+`localhost` in the base URL means the gateway itself: for a server on your own
+machine use `host.docker.internal`. And spend is priced from LiteLLM's price
+list by model name, so a well-known model (`gpt-4o-mini`) counts against the
+budgets in `gateway/agents.yaml` while an unknown one is recorded as free.
+
 ---
 
 ## What is in the box
@@ -151,6 +196,7 @@ And the files you will spend time in:
 | `make mode` | show what the current `MODE` runs |
 | `make tour` | a guided tour of every mode, step by step |
 | `make ask Q="…"` | one prompt to the gateway from your shell, with your own key |
+| `make connect` | point the gateway's `external` model at your own OpenAI-compatible endpoint |
 | `make run` | run the pipeline over every item in `input/items/` |
 | `make run ITEM=logo.png` | …or just one of them |
 | `make shell` | a shell inside the agent container, on its network, with its mounts |
@@ -246,11 +292,11 @@ The agent knows one URL (`http://gateway:4000/v1`), one key (its own), and
 one model name. It has never heard of OpenAI.
 
 That indirection pays for itself immediately. `gateway/config.yaml` maps the
-name `mock-model` to the offline fake; change `AGENT_MODEL=gpt-4o-mini` in
-`.env`, put a key in `OPENAI_API_KEY`, `docker compose restart gateway`, and
-the same image is now running against a frontier model. Nothing in the agent
-was rebuilt or even stopped. A local model works the same way — see the
-commented-out Ollama entry in `gateway/config.yaml`.
+name `mock-model` to the offline fake. Run `make connect` to point the name
+`external` at a real provider, then `AGENT_MODEL=external make run`: the same
+image is now running against a real model. Nothing in the agent was rebuilt
+or even stopped. (The fixed `gpt-4o-mini` and `claude` entries work the same
+way, with `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` in `.env`.)
 
 It also pays for itself the first time something goes wrong. The provider key
 lives in the gateway's environment, not the agent's — so a prompt injection
@@ -614,6 +660,15 @@ edited; with a real model, read the specialist's prompt in
 database and then running LiteLLM's migrations; `docker compose logs gateway`
 shows both. A data directory from a different Postgres major version will
 not start; `make clean` resets it.
+
+**`make connect` (or the `external` model) returns an error.** The message
+after "the provider said no" comes from your provider, passed through by the
+gateway. `AuthenticationError` / `Incorrect API key`: the key. `NotFound` or a
+model error: the model name, as that provider spells it. `Connection error`:
+the base URL — it usually ends in `/v1`, and `localhost` means the gateway
+container itself (use `host.docker.internal` for a server on your machine).
+If you edit the `EXTERNAL_*` values in `.env` by hand, apply them with
+`docker compose up -d gateway`; a plain `restart` keeps the old values.
 
 **The agent gets `401` from the gateway.** Its key has not been provisioned,
 usually because the gateway's volume was reset, or because a key in `.env`

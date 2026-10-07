@@ -263,6 +263,15 @@ services:
       GATEWAY_DB_PASSWORD: ${GATEWAY_DB_PASSWORD:-litellmpassword}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # The `external` model (gateway/config.yaml), set by `make connect`.
+      # `openai/` is LiteLLM's prefix for "speaks the OpenAI API".
+      EXTERNAL_BASE_URL: ${EXTERNAL_BASE_URL:-https://api.openai.com/v1}
+      EXTERNAL_LITELLM_MODEL: openai/${EXTERNAL_MODEL:-gpt-4o-mini}
+      EXTERNAL_API_KEY: ${EXTERNAL_API_KEY:-none}
+    # So `host.docker.internal` reaches your machine on Linux too (Docker
+    # Desktop provides it already): how `external` gets to a local Ollama.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./gateway/config.yaml:/app/config.yaml:ro
       - gateway_pgdata:/var/lib/postgresql/data

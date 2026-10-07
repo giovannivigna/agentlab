@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # uv's image: one tool resolves, locks and installs, and the lock
 # (agent/uv.lock) is what makes "it worked last week" reproducible next month.
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim

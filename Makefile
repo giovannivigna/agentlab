@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 DC := docker compose
 
-.PHONY: help up down run eval shell logs ps seed keys kb ask clean check mode tour \
+.PHONY: help up down run eval shell logs ps seed keys kb ask connect clean check mode tour \
         need-agent need-kb
 
 # ---------------------------------------------------------------------------
@@ -59,7 +59,11 @@ up: .env  ## build and start the platform for the current MODE
 	@extra=$$(comm -23 <($(DC) --profile '*' config --services | sort) \
 	                   <($(DC) config --services | sort)); \
 	  [ -z "$$extra" ] || $(DC) --profile '*' rm -sf $$extra >/dev/null 2>&1 || true
-	$(DC) up -d --build --wait --wait-timeout 600
+	@# Build first, best-effort: a build asks Docker Hub about base images even
+	@# when they are cached, so offline it fails - and the images already
+	@# built are fine to start. `up` alone builds only what has no image yet.
+	@$(DC) build -q || echo "warning: could not rebuild images (offline?) - starting the ones already built"
+	$(DC) up -d --wait --wait-timeout 600
 	@$(DC) run --rm gateway-keys
 	@$(if $(HAS_KB),$(DC) run --rm kb-seed,true)
 	@echo
@@ -80,7 +84,9 @@ need-agent:
 # also rebuilds the agent's dependencies and recreates mock-llm and mcp with
 # fresh IPs underneath a gateway that has cached the old ones - and when the
 # two swap addresses, the gateway's model calls land on the MCP server.
-AGENT_BUILD = $(DC) build -q agent
+# Best-effort too: the agent's code is mounted from agent/app, so an image
+# that could not be rebuilt offline still runs today's code.
+AGENT_BUILD = $(DC) build -q agent || echo "warning: could not rebuild the agent image (offline?) - using the existing one"
 
 need-kb:
 	@if [ -z "$(HAS_KB)" ]; then \
@@ -104,6 +110,9 @@ ask: .env  ## one prompt to the gateway from your shell: Q="..." [ASK_MODEL=mock
 	  -H "Content-Type: application/json" \
 	  -d "$$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "messages": [{"role": "user", "content": sys.argv[2]}]}))' \
 	        '$(or $(ASK_MODEL),mock-model)' '$(or $(Q),Say hello)')"; echo
+
+connect: .env  ## point the gateway's "external" model at your own OpenAI-compatible endpoint
+	@bash scripts/connect.sh
 
 keys: .env  ## apply gateway/agents.yaml: per-agent models, budgets, limits
 	$(DC) run --rm gateway-keys

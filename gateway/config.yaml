@@ -53,6 +53,21 @@ model_list:
       model: anthropic/claude-sonnet-4-5
       api_key: os.environ/ANTHROPIC_API_KEY
 
+  # YOUR model: any OpenAI-compatible endpoint - OpenAI, OpenRouter, Groq,
+  # Together, or a server on your own machine (Ollama, vLLM, LM Studio).
+  # `make connect` asks for the base URL, model name and key, saves them to
+  # .env, and recreates the gateway; compose.yaml passes them in. Clients
+  # always ask for "external" and present their own gateway key - the
+  # provider key never leaves this container.
+  #
+  # Spend is priced from LiteLLM's price list by model name, so a well-known
+  # model (gpt-4o-mini) counts against budgets and an unknown one costs 0.
+  - model_name: external
+    litellm_params:
+      model: os.environ/EXTERNAL_LITELLM_MODEL    # "openai/<EXTERNAL_MODEL>"
+      api_base: os.environ/EXTERNAL_BASE_URL
+      api_key: os.environ/EXTERNAL_API_KEY
+
   # A model on your own machine. `host.docker.internal` is how a container
   # reaches the host; the agent still only knows the name "local".
   # - model_name: local

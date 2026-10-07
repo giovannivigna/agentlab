@@ -76,8 +76,10 @@ step() {  # step [--optional] <command>: show the command; `run` runs it
     printf '\n%s$ %s%s\n' "$B$G" "$PENDING" "$R"
 }
 
+LAST_RUN=0
 run() {  # run the command shown by the last `step`, after Enter
     local answer rc
+    LAST_RUN=0
     if [ "$AUTO" = 1 ]; then
         if [ "$PENDING_OPTIONAL" = 1 ]; then printf '%s  (skipped with --auto)%s\n' "$D" "$R"; return 0; fi
     else
@@ -89,6 +91,7 @@ run() {  # run the command shown by the last `step`, after Enter
         esac
     fi
     echo
+    LAST_RUN=1
     eval "$PENDING"
     rc=$?
     [ "$rc" -ne 0 ] && printf '%s  (exit status %d)%s\n' "$Y" "$rc" "$R"
@@ -108,6 +111,11 @@ KB_DB=$(env_get KB_DB);                 KB_DB=${KB_DB:-kb}
 LF_EMAIL=$(env_get LANGFUSE_INIT_USER_EMAIL)
 LF_PASSWORD=$(env_get LANGFUSE_INIT_USER_PASSWORD)
 PSQL="docker compose exec -T kb psql -U $KB_USER -d $KB_DB"
+external_configured() {  # has `make connect` (or a hand edit) set up a real model?
+    local url
+    url=$(env_get EXTERNAL_BASE_URL)
+    [ -n "$(env_get EXTERNAL_API_KEY)" ] || { [ -n "$url" ] && [ "$url" != "https://api.openai.com/v1" ]; }
+}
 
 docker info >/dev/null 2>&1 || { echo "Docker is not running - start Docker Desktop first."; exit 1; }
 command -v python3 >/dev/null || { echo "this script needs python3 on the host"; exit 1; }
@@ -118,8 +126,10 @@ mode_gateway() {
     banner 1 gateway "a model endpoint that is not a vendor"
     use_mode gateway
     say "Before any agent: one URL that speaks the OpenAI protocol, in front of" \
-        "whatever model we like - here an offline fake, so nothing below needs a" \
-        "key or the internet. Every client gets its own key, with its own limits."
+        "whatever model we like. Here that is an offline fake, so everything below" \
+        "runs without a key or the internet - except one optional step, where you" \
+        "connect a real model of your own. Every client gets its own key, with its" \
+        "own limits."
 
     step "make up"
     expect "two services start: mock-llm and gateway. Then gateway-keys syncs" \
@@ -146,14 +156,36 @@ mode_gateway() {
            "and 'usage' has token counts."
     run
     notice "this is the OpenAI wire format - any OpenAI client works against it." \
-           "Add a real key to .env and 'ASK_MODEL=gpt-4o-mini' is a real model;" \
-           "the client changes nothing."
+           "In a moment the same request goes to a real model; the client changes" \
+           "nothing but the model name."
 
     step "curl -s localhost:4000/v1/models -H \"Authorization: Bearer $CLI\" | python3 -m json.tool | grep '\"id\"'"
-    expect "mock-model, mock-embed, gpt-4o-mini, claude, text-embedding-3-small."
+    expect "mock-model, mock-embed, external, gpt-4o-mini, claude, text-embedding-3-small."
     run
     notice "names, not vendors: gateway/config.yaml says what each name means." \
            "Swap the mapping, restart the gateway, and every client follows."
+
+    say "" "Now a real model, if you have access to one. The gateway's model named" \
+        "'external' forwards to any OpenAI-compatible endpoint: OpenAI, OpenRouter," \
+        "Groq, Together, or a server on your own machine (Ollama, vLLM, LM Studio)." \
+        "You need its base URL, a model name and, for most providers, an API key." \
+        "Press s to skip this and stay offline."
+    step --optional "make connect"
+    expect "three questions; the key is not echoed. The answers go into .env, the" \
+           "gateway is recreated to read them, and one short request goes through" \
+           "it: a sentence from your model, or the provider's own error if the URL," \
+           "model or key is off (run 'make connect' again to fix it)."
+    run
+    if [ "$LAST_RUN" = 1 ] || { [ "$AUTO" = 0 ] && external_configured; }; then
+        step "curl -s localhost:4000/v1/chat/completions -H \"Authorization: Bearer $CLI\" -H 'Content-Type: application/json' -d '{\"model\":\"external\",\"max_tokens\":80,\"messages\":[{\"role\":\"user\",\"content\":\"In one sentence: what is an AI agent?\"}]}' | python3 -m json.tool"
+        expect "a chat.completion from your provider: a real sentence and real token" \
+               "counts, in exactly the shape the mock's reply had."
+        run
+        notice "this request carried the gateway's 'cli' key, not your provider key." \
+               "The provider key sits in .env and is read by the gateway container" \
+               "alone; no client - and no agent - ever holds it. Change providers with" \
+               "'make connect' and this exact command keeps working."
+    fi
 
     step "curl -s localhost:4000/v1/chat/completions -H \"Authorization: Bearer $INTERN\" -H 'Content-Type: application/json' -d '{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'; echo"
     expect "an error: 'key not allowed to access model ... can only access" \
