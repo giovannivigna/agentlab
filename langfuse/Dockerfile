@@ -18,11 +18,14 @@
 
 # ClickHouse's Alpine image runs its glibc-linked binary on musl by carrying a
 # private copy of glibc next to musl. Collect that glibc so it can come along.
+# The loader's arch-named symlink to it lives in /lib on arm64 and in /lib64 on
+# x86-64, so neither path can be required: take whichever of the two is there.
 FROM clickhouse/clickhouse-server:25.12-alpine AS clickhouse
 RUN mkdir -p /stage/lib \
- && cp -a /lib/ld-2.* /lib/ld-linux-* /lib/libc.so.6 /lib/libdl.so.2 \
+ && cp -a /lib/ld-2.* /lib/libc.so.6 /lib/libdl.so.2 \
           /lib/libm.so.6 /lib/libnss_dns.so.2 /lib/libnss_files.so.2 \
           /lib/libpthread.so.0 /lib/libresolv.so.2 /lib/librt.so.1 /stage/lib/ \
+ && for ld in /lib/ld-linux-*; do [ -e "$ld" ] || continue; cp -a "$ld" /stage/lib/; done \
  && if [ -d /lib64 ]; then cp -a /lib64 /stage/; fi
 
 # MinIO is one statically linked Go binary.
