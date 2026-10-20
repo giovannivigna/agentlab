@@ -9,9 +9,12 @@
 # compose.yaml can reach them. What this does NOT buy is memory: ClickHouse is
 # most of Langfuse's footprint whichever box it runs in.
 #
-# Built from the upstream images, so `docker compose build --pull langfuse`
-# picks up new Langfuse releases. If a release changes how the web or worker
-# entrypoints work, this is the file that breaks first.
+# Built from the upstream images, pinned to an exact release. 4.54.0 is the
+# last one on Alpine: from 4.55.0 they are RHEL-based, with no apk, and the
+# `apk add` below fails. A moving tag (`:4`) picked that change up silently.
+# Moving to a newer release means porting the package step to dnf. If a
+# release changes how the web or worker entrypoints work, this is the file
+# that breaks first.
 
 # ClickHouse's Alpine image runs its glibc-linked binary on musl by carrying a
 # private copy of glibc next to musl. Collect that glibc so it can come along.
@@ -25,9 +28,9 @@ RUN mkdir -p /stage/lib \
 # MinIO is one statically linked Go binary.
 FROM cgr.dev/chainguard/minio AS minio
 
-FROM docker.langfuse.com/langfuse/langfuse-worker:4 AS worker
+FROM docker.langfuse.com/langfuse/langfuse-worker:4.54.0 AS worker
 
-FROM docker.langfuse.com/langfuse/langfuse:4
+FROM docker.langfuse.com/langfuse/langfuse:4.54.0
 USER root
 
 RUN apk add --no-cache bash su-exec postgresql17 postgresql17-client redis \

@@ -615,7 +615,7 @@ against:
 | `mcp` | 2.2 (Python SDK), in the agent and in `mcp/`. 2.x renamed `FastMCP` to `MCPServer` (`mcp.server.mcpserver`); `mcp.Client` takes a URL for Streamable HTTP or `StdioServerParameters` for a subprocess, and a stdio subprocess inherits only a minimal environment plus what you pass |
 | `pillow` | ≥ 11, in `mcp/` only |
 | `postgres` | 17, for `kb` and inside the gateway |
-| `langfuse` | v4 (server image `docker.langfuse.com/langfuse/langfuse:4`, Python SDK 4.15). Three things moved in v4 and all three bite: auth is `LANGFUSE_BASE_URL`, not `LANGFUSE_HOST`; the client method is `start_as_current_observation(as_type=…)`, not `start_as_current_span`; and traces land in ClickHouse's `events_full`, not the legacy `traces`/`observations` tables — so those tables reading empty does **not** mean ingestion is broken |
+| `langfuse` | v4 (server image `docker.langfuse.com/langfuse/langfuse:4.54.0`, the last Alpine release - see `langfuse/Dockerfile`; Python SDK 4.15). Three things moved in v4 and all three bite: auth is `LANGFUSE_BASE_URL`, not `LANGFUSE_HOST`; the client method is `start_as_current_observation(as_type=…)`, not `start_as_current_span`; and traces land in ClickHouse's `events_full`, not the legacy `traces`/`observations` tables — so those tables reading empty does **not** mean ingestion is broken |
 | `langchain` | 1.x — note that `langfuse.langchain` imports `langchain` itself, not just `langchain-core`. Omit it and tracing silently turns off with a one-line warning |
 | `langgraph` | 1.2 |
 
