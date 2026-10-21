@@ -294,7 +294,8 @@ services:
   # key's name in the environment below.
   gateway-keys:
     profiles: ["keys"]
-    image: ghcr.io/berriai/litellm:main-stable
+    # The same pinned image as gateway/Dockerfile (see there why).
+    image: ghcr.io/berriai/litellm:v1.106.1@sha256:1acf80698f7eb47021b0bf5aed01ba9e80098cf74cdb3e588515bdd48a129fa6
     depends_on:
       gateway:
         condition: service_healthy
